@@ -1,0 +1,140 @@
+# CD: "promote the SAME commit through dev -> uat -> prod".
+#
+# Starts automatically when CI passes on main (i.e. after a PR is merged).
+#   dev  : deploys straight away
+#   uat  : waits for a human to approve (GitHub Environment "uat")
+#   prod : waits for a human to approve (GitHub Environment "prod")
+#   then : tags the commit as a release (v1.0.0, v1.1.0, ...)
+#
+# Rollback / redeploy: Actions -> CD -> "Run workflow", enter an older tag.
+#
+# Deploy jobs run on the self-hosted runner on the workshop machine, because
+# that is where the "VMs" live. They never run for pull requests.
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or commit SHA to deploy (e.g. v1.0.0 for a rollback)"
+        required: true
+
+permissions:
+  contents: read
+
+# Never run two promotions at the same time.
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Pick the commit to promote
+    # Only promote CI runs that passed for a push to main in THIS repo
+    # (never a pull request, never a fork).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      is_tag: ${{ steps.pick.outputs.is_tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - id: pick
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          is_tag=false
+          if [ -n "$REF" ] && git rev-parse -q --verify "refs/tags/$REF" >/dev/null; then is_tag=true; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "is_tag=$is_tag" >> "$GITHUB_OUTPUT"
+          echo "### Promoting \`${sha:0:7}\` ${REF:+($REF)}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-dev:
+    needs: resolve
+    runs-on: [self-hosted, workshop]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Write dev config from the dev environment secret
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          mkdir -p "$HOME/workshop-envs/dev"
+          (umask 077; printf 'ENV=dev\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/dev/.env")
+      - name: Deploy
+        run: scripts/deploy.sh dev "${{ needs.resolve.outputs.sha }}"
+
+  deploy-uat:
+    needs: [resolve, deploy-dev]
+    runs-on: [self-hosted, workshop]
+    environment: uat
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Write uat config from the uat environment secret
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          mkdir -p "$HOME/workshop-envs/uat"
+          (umask 077; printf 'ENV=uat\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/uat/.env")
+      - name: Deploy
+        run: scripts/deploy.sh uat "${{ needs.resolve.outputs.sha }}"
+
+  deploy-prod:
+    needs: [resolve, deploy-uat]
+    runs-on: [self-hosted, workshop]
+    environment: prod
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Write prod config from the prod environment secret
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          mkdir -p "$HOME/workshop-envs/prod"
+          (umask 077; printf 'ENV=prod\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/prod/.env")
+      - name: Deploy
+        run: scripts/deploy.sh prod "${{ needs.resolve.outputs.sha }}"
+
+  release:
+    name: Tag the release
+    needs: [resolve, deploy-prod]
+    # A rollback to an existing tag doesn't need a new tag.
+    if: needs.resolve.outputs.is_tag != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Create next minor version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+          if [ -z "$latest" ]; then
+            next=v1.0.0
+          else
+            IFS=. read -r major minor _ <<< "${latest#v}"
+            next="v${major}.$((minor + 1)).0"
+          fi
+          gh release create "$next" --target "$SHA" --title "$next" --generate-notes
+          echo "### Released $next (\`${SHA:0:7}\`) to prod" >> "$GITHUB_STEP_SUMMARY"

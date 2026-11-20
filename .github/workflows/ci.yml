@@ -1,0 +1,60 @@
+# CI: "is this change safe to merge?"
+# Runs on GitHub's machines for every pull request and every push to main.
+# The three jobs are required status checks: a PR cannot merge until all are green.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 && uv pip install -r requirements-dev.txt
+      - name: Lint
+        run: .venv/bin/ruff check .
+      - name: Formatting
+        run: .venv/bin/ruff format --check .
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 && uv pip install -r requirements-dev.txt
+      - name: Unit and data quality tests
+        run: .venv/bin/pytest -v -m "not integration"
+
+  integration:
+    runs-on: ubuntu-latest
+    # A throwaway Postgres, same version as dev/uat/prod, that lives only for this job.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: workshop
+          POSTGRES_PASSWORD: workshop
+          POSTGRES_DB: warehouse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U workshop -d warehouse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://workshop:workshop@localhost:5432/warehouse
+      REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 && uv pip install -r requirements-dev.txt
+      - name: End-to-end pipeline against Postgres
+        run: .venv/bin/pytest -v -m integration
