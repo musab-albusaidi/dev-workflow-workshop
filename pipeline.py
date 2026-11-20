@@ -121,9 +121,6 @@ def silver(raw: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=RAW_COLUMNS)
     df = df[df["qty"] > 0]
 
-    # The same order can arrive more than once. Keep one row per order_id.
-    df = df.drop_duplicates(subset="order_id", keep="first")
-
     df = df.astype({"order_id": "int64", "qty": "int64", "unit_price": "float64"})
     df["revenue"] = (df["qty"] * df["unit_price"]).round(2)
     return df.sort_values("order_id").reset_index(drop=True)
