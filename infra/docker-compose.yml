@@ -1,9 +1,8 @@
-# ONE definition of the stack. Started three times, once per environment:
-#   docker compose -p dev  --env-file infra/env/dev.env  -f infra/docker-compose.yml up -d
-#   docker compose -p uat  --env-file infra/env/uat.env  -f infra/docker-compose.yml up -d
-#   docker compose -p prod --env-file infra/env/prod.env -f infra/docker-compose.yml up -d
-# Each project gets its own container, network and volume: like three separate VMs.
-# (scripts/envs.sh does this for you.)
+# ONE definition of the stack, used by every environment:
+#   dev  (your machine):  docker compose -p dev  --env-file infra/env/dev.env -f infra/docker-compose.yml up -d
+#   uat  (uat VM):        docker compose -p uat  --env-file /opt/workshop/infra/uat.env  -f /opt/workshop/infra/docker-compose.yml up -d
+#   prod (prod VM):       docker compose -p prod --env-file /opt/workshop/infra/prod.env -f /opt/workshop/infra/docker-compose.yml up -d
+# scripts/envs.sh does dev for you; scripts/provision-vm.sh copies this file to the VMs.
 services:
   postgres:
     image: postgres:17-alpine
@@ -12,7 +11,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "127.0.0.1:${PG_PORT}:5432"   # only reachable from this machine
+      - "127.0.0.1:${PG_PORT}:5432"   # only reachable from the machine itself, never the internet
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init:/docker-entrypoint-initdb.d:ro

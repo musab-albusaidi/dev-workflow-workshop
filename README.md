@@ -6,7 +6,7 @@ A ~90-minute live demo for the data engineering team, covering:
 - how **one commit** is promoted from dev to uat to prod, and never rebuilt along the way;
 - **git branching**, **pull requests**, **CI/CD** and **testing** for data pipelines.
 
-Everything runs for free on one laptop (WSL + Docker Engine + GitHub Actions).
+dev runs on your laptop (WSL + Docker Engine). uat and prod are two Azure VMs, deployed by GitHub Actions over SSH.
 
 ---
 
@@ -16,12 +16,16 @@ Everything runs for free on one laptop (WSL + Docker Engine + GitHub Actions).
 |---|---|
 | `pipeline.py` | The whole pipeline: `bronze()` → `silver()` → `gold()` |
 | `tests/test_pipeline.py` | Unit, data quality and integration tests |
-| `infra/docker-compose.yml` | **One** stack definition (Postgres 17), started three times |
-| `infra/env/*.env.example` | Per-environment config (port, user, db). Real `.env` files are gitignored |
-| `scripts/envs.sh` | Start, stop and inspect the three environments |
-| `scripts/deploy.sh` | Deploy one commit to one environment |
+| `infra/docker-compose.yml` | **One** stack definition (Postgres 17), used by dev, uat and prod |
+| `infra/env/*.env.example` | Per-environment config (port, user, db). Real `.env` files are gitignored or live only on the VM |
+| `scripts/envs.sh` | Operate the environments: local dev database, plus uat/prod over SSH |
+| `scripts/provision-vm.sh` | Set up a uat/prod VM by hand (Docker, Postgres, `deploy` user, sshd hardening, GitHub secrets) |
+| `scripts/vm-setup.sh` | The root half of provisioning, copied to and run on the VM |
+| `scripts/ship.sh` | CD: send one commit to one VM over SSH |
+| `scripts/workshop-receive.sh` | On the VM: the only command the deploy key can run |
+| `scripts/deploy.sh` | On the VM: install the commit, smoke test it, swap it in, write `VERSION` |
 | `.github/workflows/ci.yml` | CI: lint, unit tests and integration tests on every PR |
-| `.github/workflows/cd.yml` | CD: dev (auto) → uat (approval) → prod (approval) → release tag |
+| `.github/workflows/cd.yml` | CD: uat (auto) → prod (approval) → release tag |
 
 ### The pipeline
 
@@ -33,26 +37,30 @@ Everything runs for free on one laptop (WSL + Docker Engine + GitHub Actions).
 
 On every run, `check_quality()` enforces these rules: no duplicate orders, no nulls in key columns, no negative revenue, no empty gold tables, and both gold tables must agree on total revenue (**5,197.50**).
 
-### The simulated environments
+### The environments
 
-At work each environment is its own VM. Here, each one is a Docker Compose *project* (its own container, network and volume) plus a deploy folder:
+| Env | Where | Postgres | Code | Promotion |
+|---|---|---|---|---|
+| dev | your laptop | `localhost:5433` (Docker) | this project folder, your working copy | none: you run it yourself |
+| uat | Azure VM `UAT` | `127.0.0.1:5432` on the VM (Docker) | `/home/deploy/workshop-envs/uat/` | automatic on merge to `main` |
+| prod | Azure VM `PROD` | `127.0.0.1:5432` on the VM (Docker) | `/home/deploy/workshop-envs/prod/` | manual approval, then tagged `vX.Y.0` |
 
-| Env | Postgres | Deploy folder | Promotion |
-|---|---|---|---|
-| dev | `localhost:5433` | `~/workshop-envs/dev/` | automatic on merge to `main` |
-| uat | `localhost:5434` | `~/workshop-envs/uat/` | manual approval |
-| prod | `localhost:5435` | `~/workshop-envs/prod/` | manual approval, then tagged `vX.Y.0` |
+dev is never deployed. CI is the shared check that a change works, and uat is the first deployed environment. Each VM runs the **same** `infra/docker-compose.yml`, so uat and prod only differ in config.
 
 ```
-~/workshop-envs/uat/
-├── app/        the deployed pipeline.py + requirements.txt
-├── app.prev/   the previous version (kept after a deploy)
-├── .venv/      this environment's own Python packages
-├── .env        ENV + DATABASE_URL (written by CD from a GitHub Environment secret)
-└── VERSION     which commit (and tag, e.g. v1.0.0) is deployed, when, by whom, from which CI run
+UAT / PROD VM
+├── /opt/workshop/infra/            docker-compose.yml, init/, <env>.env (root only, mode 600)
+└── /home/deploy/workshop-envs/<env>/
+    ├── app/        the deployed pipeline.py + requirements.txt
+    ├── app.prev/   the previous version (kept after a deploy)
+    ├── .venv/      this environment's own Python packages
+    ├── .env        ENV + DATABASE_URL (sent by CD from a GitHub Environment secret)
+    └── VERSION     which commit (and tag, e.g. v1.0.0) is deployed, when, by whom, from which CI run
 ```
 
-**Deploying and running are separate steps.** A deploy puts the code in place and runs an in-memory smoke test (`--dry-run`). It never touches the database. Running the pipeline against an environment's database is something an operator does on purpose.
+**How a deploy reaches a VM.** CD runs on a GitHub-hosted runner. `scripts/ship.sh` bundles the commit's `pipeline.py` and `requirements.txt`, today's `scripts/deploy.sh` and the environment's `DATABASE_URL`, then pipes the bundle over SSH to the `deploy` user. That user's key is a *forced command* (`command="/usr/local/bin/workshop-receive",restrict`), so it can't open a shell or forward ports. It can only hand over a bundle, which `deploy.sh` then installs.
+
+**Deploying and running are separate steps.** A deploy puts the code in place and runs an in-memory smoke test (`--dry-run`). It never touches the database. Running the pipeline against an environment's database is something an operator does on purpose (`scripts/envs.sh run <env>`).
 
 ---
 
@@ -71,49 +79,56 @@ sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli container
 sudo usermod -aG docker "$USER"   # then restart the WSL shell
 ```
 
-You also need [`uv`](https://docs.astral.sh/uv/) and the `gh` CLI. WSL needs `systemd=true` in `/etc/wsl.conf`. All three environments together use about 300 MB of RAM.
+You also need [`uv`](https://docs.astral.sh/uv/) and the `gh` CLI. WSL needs `systemd=true` in `/etc/wsl.conf`.
 
-### 2. Local Python environment
+### 2. Local Python environment and dev database
 
 ```bash
 uv venv --python 3.12 && uv pip install -r requirements-dev.txt
 .venv/bin/pytest -m "not integration"     # 10 tests, about 2 seconds
+scripts/envs.sh up                        # local dev Postgres; creates infra/env/dev.env with a random password
+scripts/envs.sh run dev                   # run the pipeline from this folder against it
 ```
 
-### 3. Start the three environments
+### 3. The uat and prod VMs (Azure)
+
+Each VM: Ubuntu, a **static** public IP, and an SSH alias in `~/.ssh/config` using your personal key:
+
+```
+Host UAT
+    HostName <uat public ip>
+    User azureuser
+    IdentityFile ~/.ssh/UAT_key.pem
+    IdentitiesOnly yes
+```
+
+(the same for `PROD`). The VM's network security group allows inbound TCP 22 from **any** source, because GitHub-hosted runners connect from changing IPs. sshd is key-only and fail2ban is on. Postgres is never exposed. Then, from this folder:
 
 ```bash
-scripts/envs.sh up        # creates infra/env/<env>.env with random passwords on first run
-scripts/envs.sh status
+scripts/provision-vm.sh uat
+scripts/provision-vm.sh prod
 ```
 
-### 4. GitHub: repo, environments, secrets, branch protection
+This is safe to rerun. It installs Docker, uv and fail2ban, hardens sshd (no passwords, no root, `AllowUsers <you> deploy`), creates the `deploy` user with a forced-command key, starts Postgres from `infra/`, and writes the GitHub Environment's secrets and variables (below). The deploy key pair stays at `~/.ssh/workshop-deploy-<env>`; delete it and rerun to rotate. Rerun it after changing anything in `infra/`: CD only ships app code.
 
-- **Environments**: `dev` has no protection. `uat` and `prod` each have a required reviewer. All three are limited to the `main` branch.
-- **Environment secret**: each environment gets its own `DATABASE_URL` (`scripts/envs.sh url <env>`). The same workflow code picks up a different secret depending on which environment it deploys to.
+### 4. GitHub: environments, secrets, branch protection
+
+- **Environments**: `uat` has no reviewer, so it deploys on every merge. `prod` has a required reviewer. Both are limited to the `main` branch. There's no `dev` environment.
+- **Per-environment config** (written by `provision-vm.sh`). Secrets: `DATABASE_URL`, `SSH_PRIVATE_KEY`. Variables: `SSH_HOST`, `SSH_USER` (`deploy`), `SSH_KNOWN_HOSTS` (the VM's pinned host key). The same workflow code picks up different values depending on which environment it deploys to, and uat's key can't reach prod.
 - **Branch protection on `main`**: a PR is required, and the checks `lint`, `unit` and `integration` must pass. No approvals are required, because with one presenter GitHub won't let you approve your own PR. In a real team you'd require one or more.
 - **Actions → General → Fork pull request workflows**: require approval for all outside collaborators.
-
-### 5. Self-hosted runner (the CD "agent" on the workshop machine)
-
-Go to **Settings → Actions → Runners → New self-hosted runner → Linux** and follow the download and `config.sh` commands shown there. When asked for labels, enter `workshop`. Then, in a terminal you keep visible during the demo:
-
-```bash
-cd ~/actions-runner && ./run.sh
-```
-
-> **Security:** this runner only executes the `CD` workflow. That workflow only starts when CI passes for a push to `main` in this repo, or when someone with write access dispatches it by hand. It never runs for pull requests or forks.
+- **No self-hosted runners**: every job runs on GitHub-hosted machines, which matters for a public repo.
 
 ---
 
 ## Demo script (~90 min)
 
-> Before you start: `scripts/envs.sh status` shows all three environments healthy. Run `rm -rf ~/workshop-envs/*/app* ~/workshop-envs/*/VERSION` for a clean slate (this keeps each `.env` and `.venv`). Have the [architecture diagram](#architecture-diagram) and the runner terminal open.
+> Before you start: `scripts/envs.sh status` shows dev healthy and both VMs reachable. Have the [architecture diagram](#architecture-diagram) and the Actions tab open.
 
 ### 1. Why separate environments? (10 min)
 
 - Show `infra/docker-compose.yml`: **one** definition of the stack.
-- Show `docker ps`: three containers built from it, on three ports, with three volumes.
+- Show `scripts/envs.sh status`: the same stack running on your laptop (dev) and on two VMs (uat, prod).
 - Show `infra/env/*.env.example`: the **only** differences are config. The code is identical.
 - Lesson: if it works in uat, it works in prod, *because* they are the same stack.
 
@@ -134,15 +149,14 @@ gh pr create --fill
 ```
 
 1. On the PR, CI runs the three checks: lint, unit, integration. While they're red or pending, **Merge** is blocked.
-2. Merge the PR. **CD** starts: `deploy-dev` runs immediately and `deploy-uat` shows *Waiting for review*.
-3. Show the environment folders side by side:
+2. Merge the PR. **CD** starts: `deploy-uat` ships the commit to the uat VM straight away, and `deploy-prod` shows *Waiting for review*.
+3. Show what's deployed where:
    ```bash
-   scripts/envs.sh status       # dev is on the new commit, uat/prod are not
+   scripts/envs.sh status       # uat is on the new commit, prod is not
    ```
-4. Approve **uat** and watch the runner terminal pick up the job. `scripts/envs.sh status` now shows dev and uat on the same SHA.
-5. Run the pipeline in uat on purpose, then compare:
+4. Run the pipeline in uat on purpose, then compare:
    ```bash
-   cd ~/workshop-envs/uat/app && ../.venv/bin/python pipeline.py && cd -
+   scripts/envs.sh run uat
    scripts/envs.sh psql uat  -c 'select * from gold.customer_summary'
    scripts/envs.sh psql prod -c 'select * from gold.customer_summary'   # prod: old shape (or no tables yet)
    ```
@@ -150,7 +164,7 @@ gh pr create --fill
 ### 4. Promote to prod and release (10 min)
 
 - Approve **prod**. The `release` job tags the commit (`v1.0.0`, then `v1.1.0`, …) and creates a GitHub Release.
-- `cat ~/workshop-envs/prod/VERSION` answers "what's in prod?": commit, time, who approved it, and a link to the run.
+- `scripts/envs.sh status` (it reads `VERSION` on each VM) answers "what's in prod?": commit, time, who triggered it, and a link to the run.
 
 ### 5. CI catching a data bug (15 min)
 
@@ -165,8 +179,8 @@ gh pr create --base main --head demo/broken-silver --title "Speed up silver" --b
 
 ### 6. Rollback (5 min)
 
-- **Actions → CD → Run workflow → ref = `v1.0.0`**. It goes through the same gates (dev → uat → prod), and no new tag is created.
-- Show that `VERSION` in each environment now points to the old commit, and `app.prev/` holds what was replaced.
+- **Actions → CD → Run workflow → ref = `v1.0.0`**. It goes through the same gates (uat → prod approval), and no new tag is created. The old tag's app code is shipped with today's deploy tooling.
+- Show that `scripts/envs.sh status` now shows the old commit on both VMs, and that `app.prev/` holds what was replaced.
 
 ### 7. Testing recap (5 min)
 
@@ -186,17 +200,20 @@ See the published diagram page (link in the workshop invite), or the summary bel
 ```
 feature/* ──PR──▶ CI (lint · unit · integration) ──merge──▶ main
                                                              │
-                     CD (self-hosted runner, same commit)    ▼
-              dev :5433 ──approve──▶ uat :5434 ──approve──▶ prod :5435 ──▶ tag vX.Y.0
+                  CD (GitHub-hosted, SSH, same commit)       ▼
+   dev = your laptop        uat VM ──approve──▶ prod VM ──▶ tag vX.Y.0
+   (not deployed)          (auto)
 ```
 
 ## Useful commands
 
 ```bash
-scripts/envs.sh status                 # containers + what's deployed where
+scripts/envs.sh status                 # dev container + what's deployed on uat and prod
 scripts/envs.sh psql prod -c '\dt gold.*'
-scripts/deploy.sh dev                  # deploy your current HEAD to dev by hand
+scripts/envs.sh run dev                # run the pipeline from this folder against the dev database
+scripts/envs.sh run uat                # run the deployed pipeline on the uat VM, on purpose
 DATABASE_URL="$(scripts/envs.sh url dev)" .venv/bin/pytest -m integration   # never point this at prod
-scripts/envs.sh down                   # stop everything, keep data
-scripts/envs.sh nuke                   # delete containers, data and ~/workshop-envs
+scripts/provision-vm.sh uat            # re-apply VM setup after changing infra/
+scripts/envs.sh down                   # stop the dev database, keep data
+scripts/envs.sh nuke                   # delete the dev container and its data (VMs untouched)
 ```

@@ -1,15 +1,17 @@
-# CD: "promote the SAME commit through dev -> uat -> prod".
+# CD: "promote the SAME commit through uat -> prod".
+#
+# dev is not deployed: it is your project folder + a local Postgres.
 #
 # Starts automatically when CI passes on main (i.e. after a PR is merged).
-#   dev  : deploys straight away
-#   uat  : waits for a human to approve (GitHub Environment "uat")
+#   uat  : deploys straight away to the uat VM
 #   prod : waits for a human to approve (GitHub Environment "prod")
 #   then : tags the commit as a release (v1.0.0, v1.1.0, ...)
 #
 # Rollback / redeploy: Actions -> CD -> "Run workflow", enter an older tag.
 #
-# Deploy jobs run on the self-hosted runner on the workshop machine, because
-# that is where the "VMs" live. They never run for pull requests.
+# Every job runs on GitHub-hosted runners. The deploy jobs reach each Azure VM
+# over SSH as the 'deploy' user, whose key can only run workshop-receive
+# (see scripts/ship.sh). They never run for pull requests or forks.
 name: CD
 
 on:
@@ -64,65 +66,45 @@ jobs:
           echo "label=$label" >> "$GITHUB_OUTPUT"
           echo "### Promoting \`${sha:0:7}\` ${REF:+($REF)}" >> "$GITHUB_STEP_SUMMARY"
 
-  deploy-dev:
-    needs: resolve
-    runs-on: [self-hosted, workshop]
-    environment: dev
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-      - name: Write dev config from the dev environment secret
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          mkdir -p "$HOME/workshop-envs/dev"
-          (umask 077; printf 'ENV=dev\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/dev/.env")
-      - name: Deploy
-        env:
-          SHA: ${{ needs.resolve.outputs.sha }}
-          LABEL: ${{ needs.resolve.outputs.label }}
-        run: scripts/deploy.sh dev "$SHA" "$LABEL"
-
   deploy-uat:
-    needs: [resolve, deploy-dev]
-    runs-on: [self-hosted, workshop]
+    needs: resolve
+    runs-on: ubuntu-latest
     environment: uat
     steps:
+      # Checkout main (this workflow's commit) for the deploy tooling, with full
+      # history so ship.sh can export the app code of the commit being promoted.
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
-      - name: Write uat config from the uat environment secret
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          mkdir -p "$HOME/workshop-envs/uat"
-          (umask 077; printf 'ENV=uat\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/uat/.env")
-      - name: Deploy
+          fetch-depth: 0
+      - name: Ship to the uat VM
         env:
           SHA: ${{ needs.resolve.outputs.sha }}
           LABEL: ${{ needs.resolve.outputs.label }}
-        run: scripts/deploy.sh uat "$SHA" "$LABEL"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_KNOWN_HOSTS: ${{ vars.SSH_KNOWN_HOSTS }}
+        run: scripts/ship.sh uat "$SHA" "$LABEL"
 
   deploy-prod:
     needs: [resolve, deploy-uat]
-    runs-on: [self-hosted, workshop]
+    runs-on: ubuntu-latest
     environment: prod
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
-      - name: Write prod config from the prod environment secret
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          mkdir -p "$HOME/workshop-envs/prod"
-          (umask 077; printf 'ENV=prod\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/prod/.env")
-      - name: Deploy
+          fetch-depth: 0
+      - name: Ship to the prod VM
         env:
           SHA: ${{ needs.resolve.outputs.sha }}
           LABEL: ${{ needs.resolve.outputs.label }}
-        run: scripts/deploy.sh prod "$SHA" "$LABEL"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_KNOWN_HOSTS: ${{ vars.SSH_KNOWN_HOSTS }}
+        run: scripts/ship.sh prod "$SHA" "$LABEL"
 
   release:
     name: Tag the release
