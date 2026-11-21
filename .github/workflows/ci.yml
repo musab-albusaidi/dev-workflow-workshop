@@ -34,7 +34,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    # A throwaway Postgres, same version as dev/uat/prod, that lives only for this job.
+    # A throwaway Postgres, same image as dev/uat/prod, that lives only for this job.
     services:
       postgres:
         image: postgres:17-alpine
