@@ -45,6 +45,7 @@ jobs:
     outputs:
       sha: ${{ steps.pick.outputs.sha }}
       is_tag: ${{ steps.pick.outputs.is_tag }}
+      label: ${{ steps.pick.outputs.label }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -59,6 +60,8 @@ jobs:
           if [ -n "$REF" ] && git rev-parse -q --verify "refs/tags/$REF" >/dev/null; then is_tag=true; fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "is_tag=$is_tag" >> "$GITHUB_OUTPUT"
+          label="$(printf %s "${REF:-main}" | tr -cd 'A-Za-z0-9._/-')"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
           echo "### Promoting \`${sha:0:7}\` ${REF:+($REF)}" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-dev:
@@ -76,7 +79,10 @@ jobs:
           mkdir -p "$HOME/workshop-envs/dev"
           (umask 077; printf 'ENV=dev\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/dev/.env")
       - name: Deploy
-        run: scripts/deploy.sh dev "${{ needs.resolve.outputs.sha }}"
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+        run: scripts/deploy.sh dev "$SHA" "$LABEL"
 
   deploy-uat:
     needs: [resolve, deploy-dev]
@@ -93,7 +99,10 @@ jobs:
           mkdir -p "$HOME/workshop-envs/uat"
           (umask 077; printf 'ENV=uat\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/uat/.env")
       - name: Deploy
-        run: scripts/deploy.sh uat "${{ needs.resolve.outputs.sha }}"
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+        run: scripts/deploy.sh uat "$SHA" "$LABEL"
 
   deploy-prod:
     needs: [resolve, deploy-uat]
@@ -110,7 +119,10 @@ jobs:
           mkdir -p "$HOME/workshop-envs/prod"
           (umask 077; printf 'ENV=prod\nDATABASE_URL=%s\n' "$DATABASE_URL" > "$HOME/workshop-envs/prod/.env")
       - name: Deploy
-        run: scripts/deploy.sh prod "${{ needs.resolve.outputs.sha }}"
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+        run: scripts/deploy.sh prod "$SHA" "$LABEL"
 
   release:
     name: Tag the release
