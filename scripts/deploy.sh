@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy one commit of this repo to one environment.
 #
-#   scripts/deploy.sh <dev|uat|prod> [git-ref]     (ref defaults to HEAD)
+#   scripts/deploy.sh <dev|uat|prod> [git-ref] [label]   (ref defaults to HEAD;
+#                                                     label, e.g. v1.0.0, defaults to ref)
 #
 # What "deploy" means here (it never touches the database):
 #   1. export exactly that commit's pipeline code (not your uncommitted edits)
@@ -13,14 +14,15 @@ set -euo pipefail
 
 ENV_NAME="${1:-}"
 REF="${2:-HEAD}"
-case "$ENV_NAME" in dev|uat|prod) ;; *) echo "usage: $0 <dev|uat|prod> [git-ref]" >&2; exit 2 ;; esac
+LABEL="${3:-$REF}"
+case "$ENV_NAME" in dev|uat|prod) ;; *) echo "usage: $0 <dev|uat|prod> [git-ref] [label]" >&2; exit 2 ;; esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${DEPLOY_ROOT:-$HOME/workshop-envs}/$ENV_NAME"
 SHA="$(git -C "$ROOT" rev-parse --verify "$REF^{commit}")"
 SHORT="${SHA:0:7}"
 
-echo "==> Deploying $SHORT ($REF) to $ENV_NAME at $TARGET"
+echo "==> Deploying $SHORT ($LABEL) to $ENV_NAME at $TARGET"
 mkdir -p "$TARGET"
 
 echo "==> 1/4 Export code from the commit"
@@ -40,7 +42,7 @@ rm -rf "$TARGET/app.prev"
 [[ -d "$TARGET/app" ]] && mv "$TARGET/app" "$TARGET/app.prev"
 mv "$TARGET/app.next" "$TARGET/app"
 {
-  echo "$SHORT  $REF"
+  echo "$SHORT  $LABEL"
   echo "commit:      $SHA"
   echo "deployed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "deployed_by: ${GITHUB_ACTOR:-$USER}"

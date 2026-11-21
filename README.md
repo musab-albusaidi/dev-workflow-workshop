@@ -49,7 +49,7 @@ At work each environment is its own VM. Here, each one is a Docker Compose *proj
 ├── app.prev/   the previous version (kept after a deploy)
 ├── .venv/      this environment's own Python packages
 ├── .env        ENV + DATABASE_URL (written by CD from a GitHub Environment secret)
-└── VERSION     which commit is deployed, when, by whom, from which CI run
+└── VERSION     which commit (and tag, e.g. v1.0.0) is deployed, when, by whom, from which CI run
 ```
 
 **Deploying and running are separate steps.** A deploy puts the code in place and runs an in-memory smoke test (`--dry-run`). It never touches the database. Running the pipeline against an environment's database is something an operator does on purpose.
