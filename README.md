@@ -14,7 +14,8 @@ dev runs on your laptop (WSL + Docker Engine). uat and prod are two Azure VMs, d
 
 | Path | What it is |
 |---|---|
-| `pipeline.py` | The whole pipeline: `bronze()` → `silver()` → `gold()` |
+| `pipeline.py` | Entry point: runs `bronze()` → `silver()` → `gold()` → `check_quality()`, then writes to Postgres |
+| `etl/` | One module per stage: `source.py` (raw data), `config.py`, `bronze.py`, `silver.py`, `gold.py`, `quality.py`, `load.py` |
 | `tests/test_pipeline.py` | Unit, data quality and integration tests |
 | `infra/docker-compose.yml` | **One** stack definition (Postgres 17), used by dev, uat and prod |
 | `infra/env/*.env.example` | Per-environment config (port, user, db). Real `.env` files are gitignored or live only on the VM |
@@ -31,11 +32,11 @@ dev runs on your laptop (WSL + Docker Engine). uat and prod are two Azure VMs, d
 
 | Layer | Function | Output table | What it does |
 |---|---|---|---|
-| Bronze | `bronze()` | `bronze.orders_raw` (20 rows) | Lands the raw orders **as received**: every value a string, mess included |
-| Silver | `silver()` | `silver.orders` (13 rows) | Trims and normalises text, casts types, drops invalid rows, **deduplicates on `order_id`**, adds `revenue` |
-| Gold | `gold()` | `gold.sales_by_country_month`, `gold.customer_summary` | Business-ready tables. Only *completed* orders count as revenue |
+| Bronze | `etl/bronze.py` → `bronze()` | `bronze.orders_raw` (20 rows) | Lands the raw orders **as received**: every value a string, mess included |
+| Silver | `etl/silver.py` → `silver()` | `silver.orders` (13 rows) | Trims and normalises text, casts types, drops invalid rows, **deduplicates on `order_id`**, adds `revenue` |
+| Gold | `etl/gold.py` → `gold()` | `gold.sales_by_country_month`, `gold.customer_summary` | Business-ready tables. Only *completed* orders count as revenue |
 
-On every run, `check_quality()` enforces these rules: no duplicate orders, no nulls in key columns, no negative revenue, no empty gold tables, and both gold tables must agree on total revenue (**5,197.50**).
+On every run, `check_quality()` (`etl/quality.py`) enforces these rules: no duplicate orders, no nulls in key columns, no negative revenue, no empty gold tables, and both gold tables must agree on total revenue (**5,197.50**).
 
 ### The environments
 
@@ -51,14 +52,14 @@ dev is never deployed. CI is the shared check that a change works, and uat is th
 UAT / PROD VM
 ├── /opt/workshop/infra/            docker-compose.yml, init/, <env>.env (root only, mode 600)
 └── /home/deploy/workshop-envs/<env>/
-    ├── app/        the deployed pipeline.py + requirements.txt
+    ├── app/        the deployed pipeline.py + etl/ + requirements.txt
     ├── app.prev/   the previous version (kept after a deploy)
     ├── .venv/      this environment's own Python packages
     ├── .env        ENV + DATABASE_URL (sent by CD from a GitHub Environment secret)
     └── VERSION     which commit (and tag, e.g. v1.0.0) is deployed, when, by whom, from which CI run
 ```
 
-**How a deploy reaches a VM.** CD runs on a GitHub-hosted runner. `scripts/ship.sh` bundles the commit's `pipeline.py` and `requirements.txt`, today's `scripts/deploy.sh` and the environment's `DATABASE_URL`, then pipes the bundle over SSH to the `deploy` user. That user's key is a *forced command* (`command="/usr/local/bin/workshop-receive",restrict`), so it can't open a shell or forward ports. It can only hand over a bundle, which `deploy.sh` then installs.
+**How a deploy reaches a VM.** CD runs on a GitHub-hosted runner. `scripts/ship.sh` bundles the commit's `pipeline.py`, `etl/` and `requirements.txt`, today's `scripts/deploy.sh` and the environment's `DATABASE_URL`, then pipes the bundle over SSH to the `deploy` user. That user's key is a *forced command* (`command="/usr/local/bin/workshop-receive",restrict`), so it can't open a shell or forward ports. It can only hand over a bundle, which `deploy.sh` then installs.
 
 **Deploying and running are separate steps.** A deploy puts the code in place and runs an in-memory smoke test (`--dry-run`). It never touches the database. Running the pipeline against an environment's database is something an operator does on purpose (`scripts/envs.sh run <env>`).
 
@@ -142,7 +143,7 @@ This is safe to rerun. It installs Docker, uv and fail2ban, hardens sshd (no pas
 
 ```bash
 git switch -c feature/aov-by-customer
-# e.g. add avg_order_value to gold.customer_summary in pipeline.py, plus a test
+# e.g. add avg_order_value to gold.customer_summary in etl/gold.py, plus a test
 .venv/bin/pytest -m "not integration"
 git commit -am "Add average order value per customer" && git push -u origin HEAD
 gh pr create --fill
