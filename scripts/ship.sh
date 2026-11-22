@@ -3,7 +3,7 @@
 #
 #   scripts/ship.sh <uat|prod> <commit-sha> [label]
 #
-# Builds a bundle of the commit's pipeline.py + requirements.txt, this
+# Builds a bundle of the commit's pipeline.py + requirements.txt (+ etl/), this
 # checkout's scripts/deploy.sh and the environment's DATABASE_URL, and pipes
 # it over SSH to the deploy user on the VM. The deploy key can only run
 # /usr/local/bin/workshop-receive there (a forced command), which installs it.
@@ -33,7 +33,11 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bundle/scripts"
 
-git -C "$ROOT" archive "$SHA" pipeline.py requirements.txt | tar -x -C "$work/bundle"
+# The etl/ package only exists from the module split onwards; older tags
+# (rollbacks) are a single pipeline.py, and git archive fails on missing paths.
+app_paths=(pipeline.py requirements.txt)
+if git -C "$ROOT" cat-file -e "$SHA:etl" 2>/dev/null; then app_paths+=(etl); fi
+git -C "$ROOT" archive "$SHA" "${app_paths[@]}" | tar -x -C "$work/bundle"
 cp "$ROOT/scripts/deploy.sh" "$work/bundle/scripts/deploy.sh"
 ( umask 077; printf 'DATABASE_URL=%s\n' "$DATABASE_URL" > "$work/bundle/dotenv" )
 

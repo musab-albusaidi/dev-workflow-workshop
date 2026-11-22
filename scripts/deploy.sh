@@ -7,7 +7,8 @@
 #
 #   deploy.sh <uat|prod> <source-dir> <commit-sha> [label]
 #
-# <source-dir> holds that commit's pipeline.py and requirements.txt
+# <source-dir> holds that commit's pipeline.py and requirements.txt, plus its
+# etl/ package (commits before the module split don't have one)
 # (exported with `git archive`, so never anyone's uncommitted edits).
 #
 # What "deploy" means here (it never touches the database):
@@ -36,6 +37,7 @@ echo "==> 1/4 Copy the commit's code"
 rm -rf "$TARGET/app.next"
 mkdir -p "$TARGET/app.next"
 cp "$SRC/pipeline.py" "$SRC/requirements.txt" "$TARGET/app.next/"
+[[ -d "$SRC/etl" ]] && cp -r "$SRC/etl" "$TARGET/app.next/"
 
 echo "==> 2/4 Install dependencies"
 [[ -x "$TARGET/.venv/bin/python" ]] || uv venv --quiet --python 3.12 "$TARGET/.venv"

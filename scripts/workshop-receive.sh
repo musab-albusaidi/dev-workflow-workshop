@@ -12,7 +12,8 @@
 #   check                                     print which environment this is
 #   deploy <sha> <label> <actor> <run-url>    stdin = .tar.gz bundle from scripts/ship.sh
 #
-# The bundle holds pipeline.py, requirements.txt, scripts/deploy.sh and a
+# The bundle holds pipeline.py, requirements.txt, the etl/ package (newer
+# commits only), scripts/deploy.sh and a
 # "dotenv" file with DATABASE_URL. The environment name is never taken from
 # the client: it comes from /etc/workshop/env, written at provisioning time.
 set -euo pipefail

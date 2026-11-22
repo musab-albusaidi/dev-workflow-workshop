@@ -1,4 +1,4 @@
-"""Tests for pipeline.py.
+"""Tests for pipeline.py and the etl/ stages.
 
 Three kinds of test, from fastest to slowest:
   * unit tests        - is each function's logic right? (in memory, milliseconds)
@@ -12,21 +12,26 @@ import pandas as pd
 import pytest
 
 import pipeline as p
+from etl.bronze import bronze
+from etl.gold import gold
+from etl.quality import DataQualityError, check_quality
+from etl.silver import silver
+from etl.source import RAW_COLUMNS
 
 
 @pytest.fixture
 def raw():
-    return p.bronze(env="test")
+    return bronze(env="test")
 
 
 @pytest.fixture
 def orders(raw):
-    return p.silver(raw)
+    return silver(raw)
 
 
 @pytest.fixture
 def tables(orders):
-    return p.gold(orders)
+    return gold(orders)
 
 
 # --------------------------------------------------------------------------- #
@@ -34,7 +39,7 @@ def tables(orders):
 # --------------------------------------------------------------------------- #
 def test_bronze_lands_every_raw_row_untouched(raw):
     assert len(raw) == 20
-    assert list(raw.columns) == p.RAW_COLUMNS + ["_ingested_at", "_env"]
+    assert list(raw.columns) == RAW_COLUMNS + ["_ingested_at", "_env"]
     assert (raw["_env"] == "test").all()
     assert raw.loc[1, "country"] == " oman "  # bronze does NOT clean
 
@@ -109,13 +114,13 @@ def test_gold_customer_summary(tables):
 # Data quality
 # --------------------------------------------------------------------------- #
 def test_quality_checks_pass_on_clean_data(orders, tables):
-    p.check_quality(orders, tables)
+    check_quality(orders, tables)
 
 
 def test_quality_checks_catch_duplicate_orders(orders, tables):
     with_duplicate = pd.concat([orders, orders.head(1)], ignore_index=True)
-    with pytest.raises(p.DataQualityError, match="duplicate order_id"):
-        p.check_quality(with_duplicate, tables)
+    with pytest.raises(DataQualityError, match="duplicate order_id"):
+        check_quality(with_duplicate, tables)
 
 
 # --------------------------------------------------------------------------- #
